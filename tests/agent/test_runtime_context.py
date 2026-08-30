@@ -13,7 +13,10 @@ from nanobot.runtime_context import (
     WEBUI_QUOTE_SOURCE,
     RuntimeContextBlock,
     append_runtime_context,
+    apply_ephemeral_runtime_context,
+    normalize_runtime_context_blocks,
     normalize_webui_quote,
+    partition_runtime_context_blocks,
     public_history_message,
     resolve_runtime_context,
     runtime_context_blocks_from_metadata,
@@ -92,6 +95,98 @@ def test_webui_quote_cannot_close_the_runtime_context_envelope() -> None:
 def test_webui_quote_ignores_empty_or_non_text_values(value: object) -> None:
     assert normalize_webui_quote(value) is None
     assert webui_quote_runtime_context({WEBUI_QUOTE_METADATA: value}) is None
+
+
+def test_normalize_runtime_context_blocks_preserves_ephemeral_flag() -> None:
+    blocks = normalize_runtime_context_blocks([
+        RuntimeContextBlock(source="voice", content="  keep replies short  ", ephemeral=True),
+        RuntimeContextBlock(source="goal", content="persistent context"),
+    ])
+
+    assert blocks == [
+        RuntimeContextBlock(source="voice", content="keep replies short", ephemeral=True),
+        RuntimeContextBlock(source="goal", content="persistent context", ephemeral=False),
+    ]
+
+
+def test_partition_runtime_context_blocks_splits_rider_from_persisted() -> None:
+    persistent, rider = partition_runtime_context_blocks([
+        RuntimeContextBlock(source="voice", content="first rider", ephemeral=True),
+        RuntimeContextBlock(source="goal", content="persistent context"),
+        RuntimeContextBlock(source="voice", content="second rider", ephemeral=True),
+    ])
+
+    assert persistent == [RuntimeContextBlock(source="goal", content="persistent context")]
+    assert rider == "first rider\n\nsecond rider"
+
+
+def test_partition_runtime_context_blocks_all_persistent_keeps_rider_empty() -> None:
+    persistent, rider = partition_runtime_context_blocks([
+        RuntimeContextBlock(source="goal", content="persistent context"),
+    ])
+
+    assert persistent == [RuntimeContextBlock(source="goal", content="persistent context")]
+    assert rider == ""
+
+
+def test_apply_ephemeral_runtime_context_rides_on_system_row_without_mutating_input() -> None:
+    system = {"role": "system", "content": "base system prompt"}
+    user = {"role": "user", "content": "hello"}
+    messages = [system, user]
+
+    result = apply_ephemeral_runtime_context(messages, "delivery contract")
+
+    assert result is not messages
+    assert result[1] is user
+    assert result[0] == {"role": "system", "content": "base system prompt\n\ndelivery contract"}
+    assert messages == [
+        {"role": "system", "content": "base system prompt"},
+        {"role": "user", "content": "hello"},
+    ]
+
+
+def test_apply_ephemeral_runtime_context_falls_back_to_last_user_row() -> None:
+    messages = [
+        {"role": "user", "content": "earlier"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "user", "content": "latest"},
+    ]
+
+    result = apply_ephemeral_runtime_context(messages, "delivery contract")
+
+    assert result[2] == {"role": "user", "content": "latest\n\ndelivery contract"}
+    assert result[0] is messages[0]
+    assert result[1] is messages[1]
+    assert messages[2] == {"role": "user", "content": "latest"}
+
+
+def test_apply_ephemeral_runtime_context_handles_block_and_empty_content() -> None:
+    result = apply_ephemeral_runtime_context(
+        [{"role": "system", "content": [{"type": "text", "text": "base"}]}],
+        "delivery contract",
+    )
+    assert result[0]["content"] == [
+        {"type": "text", "text": "base"},
+        {"type": "text", "text": "delivery contract"},
+    ]
+
+    empty_system = apply_ephemeral_runtime_context(
+        [{"role": "system", "content": ""}],
+        "delivery contract",
+    )
+    assert empty_system[0]["content"] == "delivery contract"
+
+
+def test_apply_ephemeral_runtime_context_without_target_rows_returns_input() -> None:
+    messages = [{"role": "assistant", "content": "only assistant"}]
+
+    assert apply_ephemeral_runtime_context(messages, "rider") is messages
+
+
+def test_apply_ephemeral_runtime_context_with_empty_rider_returns_input() -> None:
+    messages = [{"role": "system", "content": "base"}]
+
+    assert apply_ephemeral_runtime_context(messages, "") is messages
 
 
 def test_public_history_removes_only_trusted_exact_suffix() -> None:

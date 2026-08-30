@@ -62,6 +62,7 @@ from nanobot.runtime_context import (
     RuntimeContextBlock,
     RuntimeContextProvider,
     append_runtime_context,
+    partition_runtime_context_blocks,
     resolve_runtime_context,
     runtime_context_blocks_from_metadata,
 )
@@ -139,6 +140,7 @@ class TurnContext:
     provider_state: ProviderConversationState | None = field(default=None, repr=False)
     request_context: RequestContext | None = None
     runtime_context_blocks: list[RuntimeContextBlock] = field(default_factory=list)
+    ephemeral_runtime_context: str = ""
     attributes: dict[str, Any] = field(default_factory=dict)
 
     final_content: str | None = None
@@ -946,6 +948,7 @@ class AgentLoop:
         tools: ToolRegistry | None = None,
         request_context: RequestContext | None = None,
         provider_state: ProviderConversationState | None = None,
+        ephemeral_runtime_context: str = "",
     ) -> AgentRunResult:
         """Run the agent iteration loop.
 
@@ -1026,9 +1029,10 @@ class AgentLoop:
                         pending_request,
                         effective_tools,
                     )
+                    persistent_blocks, _ = partition_runtime_context_blocks(blocks)
                     row["content"], runtime_marker = append_runtime_context(
                         user_content,
-                        blocks,
+                        persistent_blocks,
                     )
                     if runtime_marker is not None:
                         row["_meta"] = {
@@ -1186,6 +1190,7 @@ class AgentLoop:
                     message_metadata=request_metadata,
                 ),
                 provider_state=provider_state,
+                ephemeral_runtime_context=ephemeral_runtime_context,
                 llm_usage_source=source_from_request(
                     active_session_key,
                     channel=request_ctx.channel,
@@ -1909,7 +1914,13 @@ class AgentLoop:
 
         ctx.request_context = self._request_context_for_turn(ctx)
         if ctx.kind is TurnKind.USER:
-            ctx.runtime_context_blocks = await self._resolve_runtime_context_for_turn(ctx)
+            resolved_blocks = await self._resolve_runtime_context_for_turn(ctx)
+            # Persistent blocks keep the append/marker lifecycle; ephemeral
+            # blocks ride on provider requests instead and must not reach the
+            # staged provider-state message below or any persisted row.
+            ctx.runtime_context_blocks, ctx.ephemeral_runtime_context = (
+                partition_runtime_context_blocks(resolved_blocks)
+            )
         staged_provider_state = False
         if stored_state is not None and runtime.provider.can_resume_conversation_state(
             stored_state,
@@ -1998,6 +2009,7 @@ class AgentLoop:
                 tools=ctx.tools,
                 request_context=ctx.request_context,
                 provider_state=ctx.provider_state,
+                ephemeral_runtime_context=ctx.ephemeral_runtime_context,
             )
         ctx.final_content = result.final_content
         ctx.all_messages = result.messages

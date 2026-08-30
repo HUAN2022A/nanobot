@@ -26,10 +26,16 @@ class RuntimeContextBlock:
     """Provider-owned context appended verbatim to the current user content.
 
     Callers must bound and delimit content obtained from untrusted sources.
+
+    ``ephemeral`` blocks opt out of history persistence: they are rendered
+    into a request-only rider applied by the runner at dispatch time
+    (see :func:`apply_ephemeral_runtime_context`) instead of taking the
+    append/marker/persist lifecycle below.
     """
 
     source: str
     content: str
+    ephemeral: bool = False
 
 
 def normalize_webui_quote(value: Any) -> str | None:
@@ -92,7 +98,11 @@ def normalize_runtime_context_blocks(result: RuntimeContextResult) -> list[Runti
         if not source:
             raise ValueError("runtime context block source must not be empty")
         if content:
-            blocks.append(RuntimeContextBlock(source=source, content=content))
+            blocks.append(RuntimeContextBlock(
+                source=source,
+                content=content,
+                ephemeral=block.ephemeral,
+            ))
     return blocks
 
 
@@ -115,6 +125,67 @@ async def resolve_runtime_context(
     for provider in providers:
         blocks.extend(normalize_runtime_context_blocks(await provider(request)))
     return blocks
+
+
+def partition_runtime_context_blocks(
+    blocks: Sequence[RuntimeContextBlock],
+) -> tuple[list[RuntimeContextBlock], str]:
+    """Split blocks into the persisted set and the request-only rider text.
+
+    Persistent blocks keep today's append/marker lifecycle. Ephemeral blocks
+    are rendered into a single rider string that the runner applies to every
+    provider request copy at dispatch time; they never reach message content,
+    the runtime-context marker, provider state, or session history.
+    """
+    persistent: list[RuntimeContextBlock] = []
+    rider: list[str] = []
+    for block in blocks:
+        if block.ephemeral and block.content:
+            rider.append(block.content)
+        else:
+            persistent.append(block)
+    return persistent, "\n\n".join(rider)
+
+
+def apply_ephemeral_runtime_context(
+    messages: list[dict[str, Any]],
+    rider: str | None,
+) -> list[dict[str, Any]]:
+    """Apply the ephemeral runtime-context rider to a provider request copy.
+
+    The rider is session-constant, model-only context. It rides on the
+    request's system row — falling back to the last user row when no system
+    row exists — because every provider payload shape carries that row: chat
+    providers convert it into their system parameter, and Responses-style
+    providers derive request instructions from the full transcript even when
+    item replay comes from provider state. Provider state never stores the
+    system row, so the rider cannot become durable.
+
+    The input list is never mutated; at most one row is replaced by a shallow
+    copy. Producers own delimiting the block content (same contract as
+    :func:`append_runtime_context`).
+    """
+    if not rider:
+        return messages
+
+    def _with_rider(message: dict[str, Any]) -> dict[str, Any]:
+        row = dict(message)
+        content = row.get("content")
+        if isinstance(content, list):
+            row["content"] = [*content, {"type": "text", "text": rider}]
+        elif isinstance(content, str) and content:
+            row["content"] = f"{content}\n\n{rider}"
+        else:
+            row["content"] = rider
+        return row
+
+    for index, message in enumerate(messages):
+        if message.get("role") == "system":
+            return [*messages[:index], _with_rider(message), *messages[index + 1:]]
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "user":
+            return [*messages[:index], _with_rider(messages[index]), *messages[index + 1:]]
+    return messages
 
 
 def append_runtime_context(

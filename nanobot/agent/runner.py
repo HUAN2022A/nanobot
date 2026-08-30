@@ -40,6 +40,7 @@ from nanobot.providers.conversation_state import (
 )
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_MESSAGE_META,
+    apply_ephemeral_runtime_context,
     detach_runtime_context,
     reattach_runtime_context,
 )
@@ -116,6 +117,9 @@ class AgentRunSpec:
     finalize_on_max_iterations: bool = True
     provider_state: ProviderConversationState | None = None
     llm_usage_source: LLMUsageSource | None = None
+    # Session-constant, model-only context rendered from ephemeral runtime-context
+    # blocks. Applied to each provider request copy at dispatch time; never persisted.
+    ephemeral_runtime_context: str = ""
 
 
 @dataclass(slots=True)
@@ -915,7 +919,13 @@ class AgentRunner:
         tools: list[dict[str, Any]] | None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
-            "messages": messages,
+            # The ephemeral rider is applied here so every request path (model
+            # loop, no-tools finalization) and every provider payload shape
+            # receives it, while the caller-owned transcript stays untouched.
+            "messages": apply_ephemeral_runtime_context(
+                messages,
+                spec.ephemeral_runtime_context,
+            ),
             "tools": tools,
             "model": spec.runtime.model,
             "retry_mode": spec.provider_retry_mode,

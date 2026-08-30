@@ -722,6 +722,14 @@ is appended verbatim to model-visible context. Apply equivalent bounding,
 encoding, and delimiter escaping to untrusted external content.
 Persisted-turn callbacks are not invoked for `ephemeral=True` runs.
 
+Blocks that state session-constant delivery facts — for example, "replies on
+this channel are spoken aloud; keep to short plain prose" — can opt out of
+history persistence with `RuntimeContextBlock(source=..., content=...,
+ephemeral=True)`. An ephemeral block is applied to every provider request of
+the turn (including injected follow-ups) but never becomes part of the
+conversation: no persisted row, no marker, nothing to strip at display time.
+The default (`ephemeral=False`) keeps the existing append-and-replay lifecycle.
+
 ## Hooks
 
 Hooks let you observe or customize the agent loop. Subclass `AgentHook` and override the methods you need.
